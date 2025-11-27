@@ -1,0 +1,1 @@
+pyinstaller --clean --onedir --windowed --icon="Rafel.ico" --add-data "Rafel.ico;." --collect-all pyvis --hidden-import serial miu_tool.py
