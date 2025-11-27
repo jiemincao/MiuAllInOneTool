@@ -14,10 +14,10 @@ import binascii
 # =============================================
 OTA_CHUNK_SIZE = 221 # Maximum data payload per packet
 OTA_MAX_RETRIES = 5  # Max retries for packet sending
-OTA_TIMEOUT = 3.0    # Timeout for waiting for ACK (seconds)
+OTA_TIMEOUT = 5.0    # Timeout for waiting for ACK (seconds)
 ERASE_TIMEOUT = 8.0  # Longer timeout for erase operation
-# [新增] 封包間的延遲時間，讓設備有時間寫入 Flash
-INTER_PACKET_DELAY = 0.1 # 100ms
+# 封包間的延遲時間，讓設備有時間寫入 Flash (100ms)
+INTER_PACKET_DELAY = 0.1 
 
 class OTAPanel(tk.Frame):
     # 建構子接收 main_app 實體
@@ -34,7 +34,7 @@ class OTAPanel(tk.Frame):
         
         self.setup_ui()
 
-    # ... (setup_ui, select_file, process_firmware_file 保持不變) ...
+    # ... (setup_ui, select_file, process_firmware_file, _generate_fota_bin ) ...
     def setup_ui(self):
         # --- Control Panel (Left) ---
         control_frame = tk.LabelFrame(self, text="OTA Controls", bg=color_def.COLOR_BG_PANEL, fg=color_def.COLOR_TEXT, width=280)
@@ -62,7 +62,7 @@ class OTAPanel(tk.Frame):
         self.info_label.pack(fill=tk.X, padx=10, pady=10)
 
         # 3. Start Button
-        self.btn_start = tk.Button(control_frame, text="Start OTA Update", bg=color_def.COLOR_ACCENT_GREEN, fg=color_def.COLOR_BTN_FG, command=self.start_ota, height=2, state="disabled")
+        self.btn_start = tk.Button(control_frame, text="Start OTA Download", bg=color_def.COLOR_ACCENT_GREEN, fg=color_def.COLOR_BTN_FG, command=self.start_ota, height=2, state="disabled")
         self.btn_start.pack(fill=tk.X, padx=10, pady=(0, 20), side=tk.BOTTOM)
 
         # --- Status & Progress (Right) ---
@@ -130,41 +130,60 @@ class OTAPanel(tk.Frame):
             self.log(f"[OTA] Extracted - Version: 0x{extracted_version_str}, Type: {extracted_type_str}")
             # ========================
 
-            # 2. Compress (LZMA) - 使用明確的嵌入式標準參數
-            self.log("[OTA] Compressing data (LZMA standard embedded params: dict=8MB)...")
+            # 2. Compress (LZMA) - 使用明確的嵌入式標準參數            
             embedded_filters = [
                 {
                     "id": lzma.FILTER_LZMA1,
-                    "dict_size": 8 * 1024 * 1024, # 8MB
+                    "dict_size": 64 * 1024, # 64KB
                     "lc": 3, "lp": 0, "pb": 2,
-                    "mode": lzma.MODE_NORMAL,
                 }
             ]
-            compressor = lzma.LZMACompressor(format=lzma.FORMAT_ALONE, filters=embedded_filters)
-            compressed_data = compressor.compress(original_data) + compressor.flush()
-            compressed_size = len(compressed_data)
-            self.log(f"[OTA] Compression done. Size: {compressed_size} bytes (Target: ~276632)")
+            self.log("[OTA] Compressing data (LZMA standard embedded params: dict=64KB)...")
 
-            # 3. Generate Header
-            self.log("[OTA] Generating 32-byte header...")
-            # 使用標準 binascii.crc32
-            checksum = binascii.crc32(compressed_data) & 0xFFFFFFFF
-            self.log(f"[OTA Debug] Calculated Standard CRC32: {checksum:#010x} (Target: 0xedddacf9)")
-            checksum_bytes = struct.pack('<I', checksum)
-            
+            compressed_data = lzma.compress(original_data, format=lzma.FORMAT_ALONE, filters=embedded_filters)
+            compressed_size = len(compressed_data)
+
+            # compressor = lzma.LZMACompressor(format=lzma.FORMAT_ALONE, filters=embedded_filters)
+            # compressed_data = compressor.compress(original_data) + compressor.flush()
+            # compressed_size = len(compressed_data)
+            self.log(f"[OTA] Compression done. Size: {compressed_size} bytes")
+
+            # =================================================================
+            # [修改重點] 改為計算整份 Image (Header + Payload) 的 CRC32
+            # 這是最標準的做法，配合現在正確的傳輸邏輯，成功率極高。
+            # =================================================================
+            self.log("[OTA] Generating header & calculating CRC over ENTIRE image...")
+
             # Field 4: Start Address (0x00000000)
-            start_bytes = struct.pack('<I', 0x00000000)
+            start_bytes = struct.pack('>I', 0x00000000)
             # Field 5: End Address (compressed size)
-            end_bytes = struct.pack('<I', compressed_size)
+            end_bytes = struct.pack('>I', compressed_size)
             # Field 6: Reserved
             reserved_bytes = b'\0' * 4
-            
-            header = version_bytes + type_bytes + checksum_bytes + start_bytes + end_bytes + reserved_bytes
 
-            # 4. Combine into final FOTA image
-            fota_image = header + compressed_data
+            # --- 步驟 1: 建立暫時 Header，CRC 欄位先填 0 (佔位符) ---
+            checksum_placeholder = b'\x00\x00\x00\x00'
+            # temp_header = version_bytes + type_bytes + checksum_placeholder + start_bytes + end_bytes + reserved_bytes
+
+            # --- 步驟 2: 合併暫時 Header 和壓縮資料 ---
+            # full_image_for_calc = compressed_data
+            total_len_for_calc = len(compressed_data)
+
+            # --- 步驟 3: 計算整份資料的 CRC32 ---
+            self.log(f"[OTA Debug] Calculating standard CRC32 over {total_len_for_calc} bytes (Header(CRC=0) + Payload)...")
+            checksum = binascii.crc32(compressed_data) & 0xFFFFFFFF
+            self.log(f"[OTA Debug] Final Resulting CRC32 (Hex Little-Endian): {checksum:#010x}")
+
+            # --- 步驟 4: 用算出來的真 CRC 組裝最終 Header ---
+            # Field 3: Final Checksum (Little-Endian)
+            final_checksum_bytes = struct.pack('>I', checksum)
+            final_header = version_bytes + type_bytes + final_checksum_bytes + start_bytes + end_bytes + reserved_bytes
+
+            # 最終 FOTA Image
+            fota_image = final_header + compressed_data
             final_size = len(fota_image)
-            
+            # =================================================================
+
             # 5. Save to temp file
             if self.temp_fota_path and os.path.exists(self.temp_fota_path):
                 os.remove(self.temp_fota_path)
@@ -173,13 +192,13 @@ class OTAPanel(tk.Frame):
             with open(self.temp_fota_path, 'wb') as f:
                 f.write(fota_image)
                 
-            # 6. Update UI
-            self.after(0, lambda: self._update_ui_after_process(orig_size, compressed_size, final_size, checksum, extracted_version_str, extracted_type_str))
+            # 6. Download UI
+            self.after(0, lambda: self._download_ui_after_process(orig_size, compressed_size, final_size, checksum, extracted_version_str, extracted_type_str))
 
         except Exception as e:
             self.after(0, lambda: self._handle_process_error(e))
 
-    def _update_ui_after_process(self, orig_size, comp_size, final_size, checksum, version_str, type_str):
+    def _download_ui_after_process(self, orig_size, comp_size, final_size, checksum, version_str, type_str):
         info_text = (
             f"Version:   0x{version_str}\n"
             f"Type:      {type_str}\n"
@@ -250,6 +269,7 @@ class OTAPanel(tk.Frame):
 
                 # === Step 2: Send Erase Command (Hex String) ===
                 self.log_ota("[2/4] Sending Flash Erase command...")
+                # Erase ACK 也是固定的，這裡可以硬編碼
                 erase_cmd_hex = "FFFCFCFF07000000F000000008"
                 erase_ack_hex = "FFFCFCFF0B008000F00000000000000084"
                 if not self.send_and_wait_raw(erase_cmd_hex, erase_ack_hex, timeout=ERASE_TIMEOUT):
@@ -263,19 +283,42 @@ class OTAPanel(tk.Frame):
                 transmission_success = True
 
             except Exception as e:
-                self.log_ota(f"Transmission Process Error: {e}", error=True)
+                # 這裡捕捉到的是傳輸過程中的錯誤，或者用戶按下了 Stop
+                self.log_ota(f"Transmission Process Interrupted: {e}", error=True)
                 transmission_success = False
 
             finally:
                 # === Step 4: Send Finish Command (Cleanup) ===
                 if self.ser.is_open:
-                    self.log_ota("[4/4] Sending Finish command (cleanup)...")
+                    self.log_ota("[4/4] Sending Finish command (cleanup)...", color=color_def.COLOR_ACCENT_YELLOW)
+                    # Finish ACK 也是固定的
                     finish_cmd_hex = "FFFCFCFF07020000F000000006"
                     finish_ack_hex = "FFFCFCFF0B008000F00000000000000084"
-                    if not self.send_and_wait_raw(finish_cmd_hex, finish_ack_hex, timeout=2.0, retries=1):
+                    # 傳入 ignore_stop=True
+                    if not self.send_and_wait_raw(finish_cmd_hex, finish_ack_hex, timeout=2.0, retries=1, ignore_stop=True):
                          self.log_ota("Warning: Finish command verification failed.", error=True)
                     else:
-                         self.log_ota("Finish command sent and acknowledged.")
+                         self.log_ota("Finish command sent and acknowledged.", color=color_def.COLOR_ACCENT_GREEN)
+                    
+                    self.log_ota("--- Listening for post-OTA device logs (3s) ---", color=color_def.COLOR_ACCENT_YELLOW)
+                    start_listen = time.time()
+                    # 這裡使用一個簡單的迴圈來讀取剩餘資料，不受 ignore_stop 影響，強制執行
+                    while time.time() - start_listen < 3.0 and self.ser.is_open:
+                        waiting = self.ser.in_waiting
+                        if waiting > 0:
+                            try:
+                                new_data = self.ser.read(waiting)
+                                raw_hex = binascii.hexlify(new_data).decode('ascii').upper()
+                                self.log_ota(f"[POST-OTA RX RAW] {raw_hex}", color="purple")
+                                # 順便嘗試解碼成文字看看有沒有可讀訊息
+                                try:
+                                    text_data = new_data.decode('ascii', errors='ignore').strip()
+                                    if len(text_data) > 1:
+                                         self.log_ota(f"[POST-OTA Text] {text_data}", color="blue")
+                                except: pass
+                            except: pass
+                        time.sleep(0.1)
+                    self.log_ota("--- End of post-OTA listen ---")
 
             success = transmission_success
             if success:
@@ -285,9 +328,11 @@ class OTAPanel(tk.Frame):
             self.log_ota(f"Initialization Error: {e}", error=True)
             self.log(f"[OTA Error] {e}")
         finally:
+            # 確保最後一定會切回主程式的接收模式
             self.main_app.stop_ota_mode()
             self.after(0, lambda: self.finish_ota(success))
 
+    # stream_firmware: 動態產生預期的 ACK
     def stream_firmware(self):
         try:
             with open(self.temp_fota_path, 'rb') as f:
@@ -297,56 +342,71 @@ class OTAPanel(tk.Frame):
             file_version = struct.unpack('<I', fota_data[0:4])[0]
             file_type = 0x0001
             manufacturer_code = 0x1234
+            
+            # [正確] 計算總封包數量 (Count)，例如 1243
             total_packets = (total_size + OTA_CHUNK_SIZE - 1) // OTA_CHUNK_SIZE
-            self.log_ota(f"Total size: {total_size} bytes, Packets: {total_packets}")
-            expected_ack_hex = "FFFCFCFF0B008000F00000000000000084"
+            self.log_ota(f"Total size: {total_size} bytes, Total Count: {total_packets}")
+            
+            # 定義最大索引值，用於 UI 顯示 (例如 1242)
+            max_index_for_ui = total_packets - 1 if total_packets > 0 else 0
 
+            ack_prefix = binascii.unhexlify("FFFCFCFF0B008000F0000000")
+
+            # [正確] 迴圈執行 total_packets 次 (例如 0 到 1242)
             for i in range(total_packets):
                 if not self.is_running: return False
                 start_idx = i * OTA_CHUNK_SIZE
                 end_idx = min((i + 1) * OTA_CHUNK_SIZE, total_size)
                 chunk = fota_data[start_idx:end_idx]
-                current_index = i
+                current_index = i                
+                
                 packet_bin = self.build_ota_packet(file_type, manufacturer_code, file_version, 
-                                                   total_size, total_packets, i, chunk)
+                                                   total_size, total_packets, current_index, chunk)
                 
-                # [重點修改] 在這裡增加延遲
+                self.ser.reset_input_buffer()
+
+                # 動態建構預期的 ACK 封包 (payload 是當前索引)
+                ack_payload = struct.pack('<I', current_index)
+                ack_data_to_checksum = ack_prefix[4:] + ack_payload
+                ack_checksum_sum = sum(ack_data_to_checksum) & 0xFF
+                ack_checksum_val = (~ack_checksum_sum) & 0xFF
+                expected_ack_bin = ack_prefix + ack_payload + struct.pack('B', ack_checksum_val)
+                expected_ack_hex = binascii.hexlify(expected_ack_bin).decode('ascii').upper()
+                
+                # 使用動態生成的 ACK 進行比對
                 if not self.send_and_wait_bin(packet_bin, expected_ack_hex, retries=OTA_MAX_RETRIES):
-                    self.log_ota(f"Failed to send packet {current_index}/{total_packets}", error=True)
+                    self.log_ota(f"Failed to send packet {current_index}/{max_index_for_ui}", error=True)
                     return False
-                
-                # 成功發送一個封包後，等待設備寫入 Flash
-                # self.log_ota(f"Packet {current_index} ACKed. Waiting for flash write...") # Debug
+
                 time.sleep(INTER_PACKET_DELAY)
 
-                progress_percent = int((current_index / total_packets) * 100)
+                progress_divisor = max_index_for_ui if max_index_for_ui > 0 else 1
+                progress_percent = int((current_index / progress_divisor) * 100)
                 self.after(0, lambda p=progress_percent: self.progress.configure(value=p))
-                if current_index % 10 == 0 or current_index == total_packets:
-                    self.log_ota(f"Sent packet {current_index}/{total_packets} ({len(chunk)} bytes)")
+                
+                # 每一筆都印 Log，分母顯示最大索引值
+                self.log_ota(f"Sent packet {current_index}/{max_index_for_ui} ({len(chunk)} bytes)")
             return True
         except Exception as e:
             self.log_ota(f"Streaming error: {e}", error=True)
             return False
 
-    # build_ota_packet (保持上一次的修正，使用 4-byte Address 和 1-byte Length)
+    # build_ota_packet
     def build_ota_packet(self, f_type, m_code, f_ver, f_size, t_idx, c_idx, data_chunk):
         data_len = len(data_chunk)
-        # 1. Payload (Little-Endian)
+        # 1. Payload
         payload_struct = struct.pack('<HHIIIIH', f_type, m_code, f_ver, f_size, t_idx, c_idx, data_len)
         full_payload = payload_struct + data_chunk
 
         # 2. Header Parts
         header_fixed = b'\xFF\xFC\xFC\xFF'
-        cmd_id_bytes = bytes.fromhex('010000F0') # Little-Endian 0xF0000001
+        cmd_id_bytes = bytes.fromhex('010000F0')
         # 使用 2-byte Address
-        addr_bytes = struct.pack('<H', 0x0001) 
+        addr_bytes = struct.pack('<H', 0x0000) 
         mode_byte = b'\x00'
-
         # Length Calculation: Cmd(4)+Addr(2)+Mode(1) + Payload
         length_val = 4 + 2 + 1 + len(full_payload)
-        
-        # Length 打包: 強制轉換為單個 byte
-        length_bytes = bytes([length_val])
+        length_bytes = struct.pack('B', length_val)
 
         # 3. Combine for Checksum
         packet_without_checksum = length_bytes + cmd_id_bytes + addr_bytes + mode_byte + full_payload
@@ -358,20 +418,22 @@ class OTAPanel(tk.Frame):
         # 5. Final Packet
         return header_fixed + packet_without_checksum + struct.pack('B', checksum_val)
 
-    def send_and_wait_raw(self, data_hex, expected_ack_hex, timeout=OTA_TIMEOUT, retries=3):
+    # send_and_wait_raw 增加 ignore_stop 參數並往下傳遞
+    def send_and_wait_raw(self, data_hex, expected_ack_hex, timeout=OTA_TIMEOUT, retries=3, ignore_stop=False):
         data_bin = binascii.unhexlify(data_hex)
-        return self.send_and_wait_bin(data_bin, expected_ack_hex, timeout, retries)
+        return self.send_and_wait_bin(data_bin, expected_ack_hex, timeout, retries, ignore_stop=ignore_stop)
 
-    # send_and_wait_bin (保持上一次的修正)
-    def send_and_wait_bin(self, data_bin, expected_ack_hex, timeout=OTA_TIMEOUT, retries=3):
+    # send_and_wait_bin 增加 ignore_stop 參數並在檢查時使用
+    def send_and_wait_bin(self, data_bin, expected_ack_hex, timeout=OTA_TIMEOUT, retries=3, ignore_stop=False):
         expected_ack_bin = binascii.unhexlify(expected_ack_hex)
         ack_len = len(expected_ack_bin)
         
-        header_debug = binascii.hexlify(data_bin[:300]).decode('ascii').upper()
-        self.log_ota(f"[OTA Debug] TX ({len(data_bin)} bytes): {header_debug}"+("..." if len(data_bin)>300 else ""), color="gray")
+        # header_debug = binascii.hexlify(data_bin).decode('ascii').upper()
+        # self.log_ota(f"[OTA Debug] TX ({len(data_bin)} bytes): {header_debug}", color="gray")
 
         for attempt in range(retries + 1):
-            if not self.is_running: return False
+            # 如果沒有設定 ignore_stop，才檢查 is_running
+            if not ignore_stop and not self.is_running: return False
             try:
                 self.ser.reset_input_buffer()
                 self.ser.write(data_bin)
@@ -381,12 +443,30 @@ class OTAPanel(tk.Frame):
                 start_time = time.time()
                 rx_buffer = b""
                 while time.time() - start_time < timeout:
-                    if self.ser.in_waiting > 0:
-                        byte = self.ser.read(1)
-                        rx_buffer += byte
-                        if len(rx_buffer) > ack_len * 2: rx_buffer = rx_buffer[-ack_len:]
-                        if expected_ack_bin in rx_buffer: return True
+                    waiting = self.ser.in_waiting
+                    if waiting > 0:
+                        # 1. 讀取所有目前可用的資料
+                        new_data = self.ser.read(waiting)
+                        if new_data:
+                            # 2. 立即印出收到的原始 Hex 資料，用紫色標示
+                            # raw_hex = binascii.hexlify(new_data).decode('ascii').upper()
+                            # self.log_ota(f"[RX RAW] {raw_hex}", color="purple")
+
+                            # 3. 加到緩衝區
+                            rx_buffer += new_data
+                            
+                            # 4. 檢查是否包含預期的 ACK
+                            # 為了避免緩衝區無限增長，保留足夠的長度來比對就好 (例如 ACK 長度的 4 倍)
+                            if len(rx_buffer) > ack_len * 4:
+                                rx_buffer = rx_buffer[-(ack_len * 4):]
+
+                            if expected_ack_bin in rx_buffer: 
+                                # 找到了 ACK
+                                # rx_debug = binascii.hexlify(expected_ack_bin).decode('ascii').upper()
+                                # self.log_ota(f"[OTA Debug] Found ACK: {rx_debug}", color="green")
+                                return True
                     else:
+                        # 稍微睡一下釋放 CPU
                         time.sleep(0.005)
 
                 if attempt < retries:
@@ -397,14 +477,17 @@ class OTAPanel(tk.Frame):
                         try:
                             rx_text = full_rx.decode('ascii', errors='ignore').strip()
                             if rx_text and len(rx_text) > 1:
-                                self.log_ota(f"[OTA Debug] RX (Device Log): {rx_text}", error=True)
+                                # self.log_ota(f"[OTA Debug] RX (Device Log): {rx_text}", error=True)
+                                pass
                             else:
                                 raise ValueError("Empty or tiny text")
-                        except:
-                            rx_debug = binascii.hexlify(full_rx).decode('ascii').upper()
-                            self.log_ota(f"[OTA Debug] RX (Hex): {rx_debug}", error=True)
+                        except:                            
+                            # rx_debug = binascii.hexlify(full_rx).decode('ascii').upper()
+                            # self.log_ota(f"[OTA Debug] RX (Hex): {rx_debug}", error=True)
+                            pass
                     else:
-                        self.log_ota(f"[OTA Debug] RX buffer empty.", error=True)
+                        # self.log_ota(f"[OTA Debug] RX buffer empty.", error=True)
+                        pass
                     time.sleep(0.5)
 
             except Exception as e:
@@ -412,12 +495,13 @@ class OTAPanel(tk.Frame):
                  return False
         return False
 
-    # send_and_wait_ascii (保持上一次的修正)
-    def send_and_wait_ascii(self, command, expected_response, timeout=3.0, retries=3):
+    # send_and_wait_ascii 也增加 ignore_stop
+    def send_and_wait_ascii(self, command, expected_response, timeout=3.0, retries=3, ignore_stop=False):
         """ Sends an ASCII command and waits for a text response using readline. """
         cmd_bytes = command.encode('utf-8') + b'\r\n'
         for attempt in range(retries + 1):
-            if not self.is_running: return False
+            # 如果沒有設定 ignore_stop，才檢查 is_running
+            if not ignore_stop and not self.is_running: return False
             try:
                 self.ser.reset_input_buffer()
                 self.ser.write(cmd_bytes)
@@ -444,20 +528,20 @@ class OTAPanel(tk.Frame):
 
     def finish_ota(self, success):
         self.is_running = False
-        self.btn_start.config(text="Start OTA Update", bg=color_def.COLOR_ACCENT_GREEN)
+        self.btn_start.config(text="Start OTA Download", bg=color_def.COLOR_ACCENT_GREEN)
         self.btn_select.config(state="normal")
         if success:
-            self.set_status("OTA Update Completed Successfully!", color_def.COLOR_ACCENT_GREEN)
+            self.set_status("OTA Download Completed Successfully!", color_def.COLOR_ACCENT_GREEN)
             self.progress['value'] = 100
-            messagebox.showinfo("OTA Finish", "Firmware update completed successfully.")
+            messagebox.showinfo("OTA Finish", "Firmware download completed successfully.")
         else:
-            self.set_status("OTA Update Failed.", color_def.COLOR_ACCENT_RED)
+            self.set_status("OTA Download Stopped/Failed.", color_def.COLOR_ACCENT_RED)
+            self.progress['value'] = 0
 
     # ================= Helper Functions =================
     # ... (log_ota, set_status, stop_all_tasks, __del__ 保持不變) ...
     def log_ota(self, message, error=False, color=None):
         """ Logs messages to the OTA-specific text area with optional coloring. """
-        if not self.is_running and not error and color is None: return # 避免停止後還在寫 log
 
         self.ota_log.config(state="normal")
         tag = "normal"
@@ -483,7 +567,7 @@ class OTAPanel(tk.Frame):
         if self.is_running:
             self.log("[OTA] Stopping tasks due to tab change...")
             self.is_running = False
-            self.btn_start.config(text="Start OTA Update", bg=color_def.COLOR_ACCENT_GREEN)
+            self.btn_start.config(text="Start OTA Download", bg=color_def.COLOR_ACCENT_GREEN)
             self.btn_select.config(state="normal")
             self.set_status("Stopped by tab change.", color_def.COLOR_ACCENT_YELLOW)
             # 確保在意外切換分頁時也能恢復主程式讀取

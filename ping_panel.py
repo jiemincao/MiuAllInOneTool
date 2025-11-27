@@ -207,7 +207,7 @@ class PingPanel(tk.Frame):
             timeout_per_pkt = float(timeout_per_pkt_str)
 
             # 指令中的 count 固定為 1
-            base_cmd_single = f"ot ping {{}} {size_str} 1 1 64 {int(timeout_per_pkt)}"
+            base_cmd_single = f"ot ping {{}} {size_str} 1 1 15 {int(timeout_per_pkt)}"
             
             total_nodes = len(target_item_ids)
             

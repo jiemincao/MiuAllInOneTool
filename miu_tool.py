@@ -327,11 +327,11 @@ class MiuAllInOneTool:
         role_text = role.upper()
         role_fg, role_bg = color_def.COLOR_TEXT, color_def.COLOR_BG_SUB
         if role == "leader":
-            role_fg, role_bg = "#FFFFFF", color_def.COLOR_ACCENT_GREEN
-        elif role == "router":
-            role_fg, role_bg = "#000000", color_def.COLOR_ACCENT_YELLOW
-        elif role == "child" or role == "detached" or role == "disabled":
             role_fg, role_bg = "#FFFFFF", color_def.COLOR_ACCENT_RED
+        elif role == "router":
+            role_fg, role_bg = "#000000", color_def.COLOR_ACCENT_BLUE
+        elif role == "child" or role == "detached" or role == "disabled":
+            role_fg, role_bg = "#FFFFFF", color_def.COLOR_ACCENT_GREEN
             
         self.role_display.config(text=role_text, fg=role_fg, bg=role_bg)
         self.state_display.config(text=state.title(), fg=color_def.COLOR_ACCENT_GREEN)
