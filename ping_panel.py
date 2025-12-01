@@ -15,7 +15,7 @@ except ImportError:
     messagebox.showerror("Error", "Missing required library: openpyxl.\nPlease install it using: pip install openpyxl")
 
 # =====================================================================
-#  PingPanel - Final Version (Leader Only, Master Summary Update Only)
+#  PingPanel - Fixed: Serialized OT Ping commands using Lock
 # =====================================================================
 class PingPanel(tk.Frame):
     def __init__(self, parent, ser, log_func, response_queue):
@@ -27,13 +27,14 @@ class PingPanel(tk.Frame):
         self.is_working = False
         self.work_thread = None
         self.mesh_prefix = ""
+        
+        # [新增] 串口互斥鎖，確保同一時間只有一個 OT 指令在執行
+        self.serial_lock = threading.Lock()
 
         self.setup_ui()
-        # 確保結果目錄存在
         if not os.path.exists("results"):
             os.makedirs("results")
         
-        # [關鍵] 定義固定的主總結檔案名稱
         self.master_summary_file = os.path.join("results", "ping_master_summary.xlsx")
 
     def setup_ui(self):
@@ -127,22 +128,23 @@ class PingPanel(tk.Frame):
             except Exception as e:
                 self.log(f"[PingTool] Failed to send 'ot log level 0': {e}")
 
-    # [新增] 檢查當前裝置是否為 Leader 的輔助函式
     def check_is_leader(self):
         if not self.ser.is_open:
             messagebox.showwarning("Error", "Not connected."); return False
         
         self.log("[PingTool] Checking device role (must be Leader)...")
-        with self.response_queue.mutex: self.response_queue.queue.clear()
-        self.send_cmd("ot state")
+        
+        # 使用鎖來保護這個檢查過程
+        with self.serial_lock:
+            with self.response_queue.mutex: self.response_queue.queue.clear()
+            self.send_cmd("ot state")
 
-        def match_state(line, all_lines):
-            # 匹配常見的狀態回應
-            if line.strip() in ["leader", "router", "child", "detached", "disabled"]:
-                return line.strip()
-            return None
+            def match_state(line, all_lines):
+                if line.strip() in ["leader", "router", "child", "detached", "disabled"]:
+                    return line.strip()
+                return None
 
-        state = self.wait_for_response(match_state, timeout=2.0)
+            state = self.wait_for_response(match_state, timeout=2.0)
         
         if state == "leader":
             self.log("[PingTool] Role confirmed: Leader. Proceeding.")
@@ -156,7 +158,6 @@ class PingPanel(tk.Frame):
             messagebox.showwarning("Role Restriction", f"Current device role is '{state}'.\nOnly 'leader' can perform this action.")
             return False
 
-    # [保留] 用於「原地更新」主總結檔案的輔助函式
     def update_master_summary(self, new_data_list):
         if not new_data_list: return
         filename = self.master_summary_file
@@ -180,7 +181,6 @@ class PingPanel(tk.Frame):
         except Exception as e:
             self.log(f"[PingTool] Error updating master summary: {e}")
 
-    # [新增] 計算當前統計資料的輔助函式
     def calculate_current_stats(self, target_item_ids, node_results, node_rtts, current_total_rounds):
         stats_list = []
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -216,7 +216,6 @@ class PingPanel(tk.Frame):
 
     # ================= Discovery Logic =================
     def start_discovery_thread(self):
-        # [需求] 加入角色檢查
         if not self.check_is_leader(): return
         
         if self.is_working: return
@@ -229,55 +228,54 @@ class PingPanel(tk.Frame):
     def discovery_task(self):
         self.log("[PingTool] Starting node discovery...")
         try:
-            # --- Step 1: Get Prefix ---
-            self.log("[PingTool] Getting mesh prefix...")
-            with self.response_queue.mutex: self.response_queue.queue.clear()
-            self.send_cmd("ot ipaddr mleid")
-            
-            found_prefix = None
-            def match_prefix_done(line, all_lines):
-                nonlocal found_prefix
-                if "fd" in line and ":" in line and "Done" not in line and ">" not in line:
-                    parts = line.strip().split(':')
-                    if len(parts) >= 4:
-                        found_prefix = ":".join(parts[:4]) + ":"
-                if "Done" in line: return found_prefix if found_prefix else "NOT_FOUND"
-                return None
+            # 使用鎖保護 Discovery 過程
+            with self.serial_lock:
+                # --- Step 1: Get Prefix ---
+                self.log("[PingTool] Getting mesh prefix...")
+                with self.response_queue.mutex: self.response_queue.queue.clear()
+                self.send_cmd("ot ipaddr mleid")
+                
+                found_prefix = None
+                def match_prefix_done(line, all_lines):
+                    nonlocal found_prefix
+                    if "fd" in line and ":" in line and "Done" not in line and ">" not in line:
+                        parts = line.strip().split(':')
+                        if len(parts) >= 4:
+                            found_prefix = ":".join(parts[:4]) + ":"
+                    if "Done" in line: return found_prefix if found_prefix else "NOT_FOUND"
+                    return None
 
-            prefix_result = self.wait_for_response(match_prefix_done, timeout=3.0)
-            if not prefix_result or prefix_result == "NOT_FOUND":
-                 raise Exception("Failed to get prefix (timeout or not found).")
-            self.mesh_prefix = prefix_result
-            self.log(f"[PingTool] Prefix found: {self.mesh_prefix}")
-            time.sleep(0.5)
+                prefix_result = self.wait_for_response(match_prefix_done, timeout=3.0)
+                if not prefix_result or prefix_result == "NOT_FOUND":
+                     raise Exception("Failed to get prefix (timeout or not found).")
+                self.mesh_prefix = prefix_result
+                self.log(f"[PingTool] Prefix found: {self.mesh_prefix}")
+                time.sleep(0.5)
 
-            # --- Step 2: Get Node List & Parse Index ---
-            self.log("[PingTool] Getting node list...")
-            with self.response_queue.mutex: self.response_queue.queue.clear()
-            self.send_cmd("app node list")
+                # --- Step 2: Get Node List & Parse Index ---
+                self.log("[PingTool] Getting node list...")
+                with self.response_queue.mutex: self.response_queue.queue.clear()
+                self.send_cmd("app node list")
 
-            def match_node_list_ok(line, all_lines):
-                if "Done" in line: return all_lines
-                return None
+                def match_node_list_ok(line, all_lines):
+                    if "Done" in line: return all_lines
+                    return None
 
-            node_lines = self.wait_for_response(match_node_list_ok, timeout=10.0)
-            if not node_lines: raise Exception("Failed to get node list (Done timeout).")
+                node_lines = self.wait_for_response(match_node_list_ok, timeout=10.0)
+                if not node_lines: raise Exception("Failed to get node list (Done timeout).")
 
+            # 解析部分不需要鎖
             self.log("[PingTool] Parsing node list...")
             parse_count = 0
-            
             regex_pattern = r'\[(\d+)\]\s+(router|child|detached)\s+(?:[0-9A-Fa-f]{4}\s+){2}([0-9A-Fa-f]{16})'
-            
             for line in node_lines:
                 match = re.search(regex_pattern, line)
                 if match:
                     index_str = match.group(1)
                     role_str = match.group(2)
                     full_ext_addr = match.group(3)
-                    
                     rloc16_prefix = full_ext_addr[:4] 
                     target_ip = f"{self.mesh_prefix}{rloc16_prefix}:0000:0000:0000"
-                    
                     self.after(0, lambda idx=index_str, r=role_str, ip=target_ip: 
                                self.combined_tree.insert('', tk.END, values=(idx, r, ip, "Ready")))
                     parse_count += 1
@@ -293,21 +291,27 @@ class PingPanel(tk.Frame):
 
     # ================= Ping Logic (Multi-threaded Round-Robin) =================
     def start_ping_selected_thread(self):
-        # [需求] 加入角色檢查
         if not self.check_is_leader(): return
 
         selected_items = self.combined_tree.selection()
         if not selected_items: messagebox.showwarning("Info", "Please select node(s) to ping."); return
-        self.send_silence_command()
+        
+        # 使用鎖發送靜音命令
+        with self.serial_lock:
+            self.send_silence_command()
+        
         self.run_ping_task(selected_items, is_ping_all=False)
 
     def start_ping_all_thread(self):
-        # [需求] 加入角色檢查
         if not self.check_is_leader(): return
 
         all_items = self.combined_tree.get_children()
         if not all_items: messagebox.showwarning("Info", "No nodes available. Please discover first."); return
-        self.send_silence_command()
+        
+        # 使用鎖發送靜音命令
+        with self.serial_lock:
+            self.send_silence_command()
+        
         self.run_ping_task(all_items, is_ping_all=True)
 
     def stop_ping_process(self):
@@ -320,21 +324,49 @@ class PingPanel(tk.Frame):
             self.log("[PingTool] Stopping tasks due to tab change...")
             self.is_working = False
 
+    # [關鍵修正] 新的等待函式，必須等到 "Done"
+    def wait_for_ot_ping_done(self, timeout):
+        start_time = time.time()
+        ping_result = None # 用來暫存抓到的結果
+
+        while time.time() - start_time < timeout:
+            try:
+                line = self.response_queue.get(timeout=0.1)
+                # self.log(f"[DEBUG] Read: {line.strip()}") # Debug 用
+
+                # 1. 嘗試抓取結果 (如果還沒抓到的話)
+                if ping_result is None:
+                    rtt_match = re.search(r"time=(\d+)ms", line)
+                    if rtt_match:
+                        ping_result = ("OK", int(rtt_match.group(1)))
+                    else:
+                        summary_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+packets received", line)
+                        if summary_match and int(summary_match.group(1)) == 1 and int(summary_match.group(2)) == 0:
+                             ping_result = ("Timeout", None)
+                        elif "Error" in line and "ot ping" not in line:
+                             ping_result = ("Error", None)
+
+                # 2. [關鍵] 檢查是否為 "Done"，這才是命令結束的標誌
+                if "Done" in line.strip():
+                    # 如果有抓到結果就回傳，否則預設為 Timeout (例如只看到 Done 但沒看到 summary)
+                    return ping_result if ping_result else ("Timeout", None)
+
+            except queue.Empty:
+                if not self.ser.is_open: break
+                continue
+        
+        return None # 超時仍未看到 Done
+
+    # [關鍵修正] 執行單一 OT Ping 的任務函式 (加上鎖和新的等待機制)
     def run_single_ot_ping(self, target_ip, size_str, timeout_per_pkt):
         cmd = f"ot ping {target_ip} {size_str} 1 1 15 {int(timeout_per_pkt)}"
-        with self.response_queue.mutex: self.response_queue.queue.clear()
-        self.send_cmd(cmd)
-
-        def match_ping_result(line, all_lines):
-            rtt_match = re.search(r"time=(\d+)ms", line)
-            if rtt_match: return ("OK", int(rtt_match.group(1)))
-            summary_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+packets received", line)
-            if summary_match and int(summary_match.group(1)) == 1 and int(summary_match.group(2)) == 0:
-                return ("Timeout", None)
-            if "Error" in line and "ot ping" not in line: return ("Error", None)
-            return None
-
-        return self.wait_for_response(match_ping_result, timeout=timeout_per_pkt + 1.0)
+        
+        # [關鍵] 取得鎖，確保這段期間只有這個執行緒在操作串口
+        with self.serial_lock:
+            with self.response_queue.mutex: self.response_queue.queue.clear()
+            self.send_cmd(cmd)
+            # 使用新的等待函式，死等 "Done"
+            return self.wait_for_ot_ping_done(timeout=timeout_per_pkt + 2.0) # timeout 多給一點緩衝
 
     def run_ping_task(self, target_item_ids, is_ping_all=False):
         if not self.ser.is_open: messagebox.showwarning("Error", "Not connected."); return
