@@ -241,6 +241,14 @@ class TopologyPanel(tk.Frame):
             if state_result and state_result != "ERROR":
                 my_role = state_result
 
+
+            if my_role == "leader":
+                self.log("Role confirmed: Leader. Proceeding.")
+            else:
+                self.log(f"Role mismatch. Current role: {my_role}. Action aborted.")
+                messagebox.showwarning("Role Restriction", f"Current device role is '{my_role}'.\nOnly 'leader' can perform this action.")
+                return False
+            
             # --- Step 4: 獲取 Extaddr ---
             with self.response_queue.mutex: self.response_queue.queue.clear()
             self.send_cmd("ot extaddr")
@@ -263,7 +271,7 @@ class TopologyPanel(tk.Frame):
             with self.response_queue.mutex: self.response_queue.queue.clear()
             self.send_cmd("app node list")
             def match_list_done(line, all_lines):
-                if "+Ok" in line: return all_lines
+                if "Done" in line: return all_lines
                 return None
             list_lines = self.wait_for_response(match_list_done, timeout=8.0)
             if not list_lines: raise Exception("Node list timeout")

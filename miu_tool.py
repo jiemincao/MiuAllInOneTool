@@ -47,7 +47,7 @@ class MiuAllInOneTool:
         self.ota_queue = queue.Queue()   
         self.text_queue = queue.Queue()  
         self.gui_update_queue = queue.Queue() 
-        self.ping_response_queue = queue.Queue()
+        self.rx_queue = queue.Queue()
 
         # --- 日誌檔案相關變數 ---
         self.log_file = None
@@ -140,11 +140,11 @@ class MiuAllInOneTool:
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         
         # Tab 1: Topology
-        self.tab_topology = TopologyPanel(self.notebook, self.ser, self.log, self.ping_response_queue)
+        self.tab_topology = TopologyPanel(self.notebook, self.ser, self.log, self.rx_queue)
         self.notebook.add(self.tab_topology, text=" Topology Viewer ")
         
         # Tab 2: Ping Tool
-        self.tab_ping = PingPanel(self.notebook, self.ser, self.log, self.ping_response_queue)
+        self.tab_ping = PingPanel(self.notebook, self.ser, self.log, self.rx_queue)
         self.notebook.add(self.tab_ping, text=" Advanced Ping Tool ")
 
         # Tab 3: OTA Update
@@ -299,7 +299,7 @@ class MiuAllInOneTool:
                             decoded_line = complete_line_bytes.decode('utf-8', errors='ignore').strip()
                             if decoded_line:
                                 self.log(f"[RX] {decoded_line}")
-                                self.ping_response_queue.put(decoded_line)
+                                self.rx_queue.put(decoded_line)
                                 lower_line = decoded_line.lower()
                                 if lower_line in KNOWN_ROLES:
                                     self.gui_update_queue.put(("update_role", lower_line))

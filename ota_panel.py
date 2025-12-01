@@ -256,12 +256,12 @@ class OTAPanel(tk.Frame):
                      raise Exception("Failed to set log level (no 'Done').")
                 self.log_ota("Log level set to 0.")
 
-                # === Step 1: Send Start Command (等待 +Ok) ===
+                # === Step 1: Send Start Command (等待 Done) ===
                 self.log_ota("[1/4] Sending start command: ota download")
-                if not self.send_and_wait_ascii("ota download", "+Ok", timeout=5.0):
-                     raise Exception("Failed to enter OTA mode (no '+Ok').")
+                if not self.send_and_wait_ascii("ota download", "Done", timeout=5.0):
+                     raise Exception("Failed to enter OTA mode (no 'Done').")
                 
-                self.log_ota("OTA mode confirmed (+Ok). Waiting for readiness...")
+                self.log_ota("OTA mode confirmed (Done). Waiting for readiness...")
                 time.sleep(1.0) 
                 
                 self.log_ota("Clearing buffer for binary transfer...")
