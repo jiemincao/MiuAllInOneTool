@@ -26,7 +26,7 @@ def resource_path(relative_path):
 class MiuAllInOneTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("Miu All-In-One Tool v1.2.2 (OTA & GUI Fix)")
+        self.root.title("Miu All-In-One Tool v1.0.0")
         try:
             self.root.iconbitmap(resource_path("Rafel.ico"))
         except Exception as e:
@@ -145,12 +145,12 @@ class MiuAllInOneTool:
         
         # Tab 2: Ping Tool
         self.tab_ping = PingPanel(self.notebook, self.ser, self.log, self.rx_queue)
-        self.notebook.add(self.tab_ping, text=" Advanced Ping Tool ")
+        self.notebook.add(self.tab_ping, text=" Ping Test ")
 
         # Tab 3: OTA Update
         # [關鍵修改] 傳遞 self (主程式實體) 給 OTAPanel
         self.tab_ota = OTAPanel(self, self.ser, self.log, self.ota_queue)
-        self.notebook.add(self.tab_ota, text=" OTA Update ")
+        self.notebook.add(self.tab_ota, text=" OTA Download ")
 
     # ===========================
     # 核心邏輯

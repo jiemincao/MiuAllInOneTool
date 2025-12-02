@@ -274,8 +274,11 @@ class PingPanel(tk.Frame):
                     index_str = match.group(1)
                     role_str = match.group(2)
                     full_ext_addr = match.group(3)
-                    rloc16_prefix = full_ext_addr[:4] 
-                    target_ip = f"{self.mesh_prefix}{rloc16_prefix}:0000:0000:0000"
+                    part1 = full_ext_addr[0:4]
+                    part2 = full_ext_addr[4:8]
+                    part3 = full_ext_addr[8:12]
+                    part4 = full_ext_addr[12:16]
+                    target_ip = f"{self.mesh_prefix}{part1}:{part2}:{part3}:{part4}"
                     self.after(0, lambda idx=index_str, r=role_str, ip=target_ip: 
                                self.combined_tree.insert('', tk.END, values=(idx, r, ip, "Ready")))
                     parse_count += 1
